@@ -1,0 +1,274 @@
+const VIRTUAL_W = 500;
+const VIRTUAL_H = 700;
+
+const PIECE_DEFS = [
+  { key: 'leftleg',    file: 'leftleg.svg',    tx:  -40, ty:  100, nw:  65.79, nh: 100.89, order: 0 },
+  { key: 'rightleg',   file: 'rightleg.svg',   tx:   40, ty:  100, nw:  65.79, nh: 100.89, order: 0 },
+  { key: 'body',       file: 'body.svg',       tx:    0, ty:  -35, nw: 231.85, nh: 187.58, order: 1 },
+  { key: 'arm1',       file: 'arm1.svg',       tx: -142, ty: -102, nw:  53.80, nh:  53.80, order: 1 },
+  { key: 'arm1_1',     file: 'arm1_1.svg',     tx: -142, ty:  -50, nw:  53.80, nh:  53.80, order: 1 },
+  { key: 'armright',   file: 'armright.svg',   tx:  142, ty: -102, nw:  53.80, nh:  53.80, order: 1 },
+  { key: 'armright_1', file: 'armright_1.svg', tx:  142, ty:  -50, nw:  53.30, nh:  53.80, order: 1 },
+  { key: 'hair',       file: 'hair.svg',       tx:    0, ty: -190, nw: 145.09, nh: 128.86, order: 2 },
+  { key: 'face',       file: 'face.svg',       tx:    0, ty: -170, nw: 118.51, nh: 117.66, order: 3 },
+  { key: 'bangs',      file: 'bangs.svg',      tx:    0, ty: -220, nw: 105.84, nh:  40.04, order: 4 },
+  { key: 'hairclip',   file: 'hairclip.svg',   tx:  -40, ty: -215, nw:  70.09, nh:  68.33, order: 5 },
+];
+
+// VIBGYOR hues in HSB
+const RAINBOW_HUES = [270, 250, 210, 120, 60, 30, 0];
+
+let imgs = {};
+let pieces = [];
+let scl;
+let headOffsetY = 0;
+
+let cx, cy;
+let vx = 0, vy = 0;
+let dragX = 0, dragY = 0;
+
+const dragStrength = 0.05;
+const damping = 0.82;
+
+let bodyAngle = 0;
+let bodyAngVel = 0;
+
+let legPhase = 0;
+let smoothSpeed = 0;
+
+let showMirror = false;
+
+let sizeMult = 1.0;
+const SIZE_STEP = 0.1;
+const SIZE_MIN  = 0.3;
+const SIZE_MAX  = 3.0;
+
+let trailEnabled = false;
+
+// Each point: { x, y, born } — born is frameCount when the point was added
+let trailPoints = [];
+const TRAIL_CAPACITY = 300;
+const TRAIL_LIFE = 30; // frames until fully faded (~0.5s at 60fps)
+
+function preload() {
+  for (let p of PIECE_DEFS) imgs[p.key] = loadImage(p.file);
+}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  imageMode(CENTER);
+  recalc();
+  cx = width / 2;
+  cy = height / 2;
+}
+
+function recalc() {
+  scl = min(width / VIRTUAL_W, height / VIRTUAL_H) * 0.32;
+  pieces = PIECE_DEFS.map(d => ({
+    ...d,
+    tx: d.tx * scl,
+    ty: d.ty * scl,
+    w:  d.nw * scl,
+    h:  d.nh * scl,
+  }));
+  headOffsetY = -170 * scl;
+}
+
+function draw() {
+  background(255);
+  updateCharacter();
+
+  if (trailEnabled) {
+    let headX = cx + dragX;
+    let headY = cy + dragY - headOffsetY * sizeMult;
+
+    // Add point only when moved at least 4px
+    let last = trailPoints[trailPoints.length - 1];
+    if (!last || dist(headX, headY, last.x, last.y) > 4) {
+      trailPoints.push({ x: headX, y: headY, born: frameCount });
+      if (trailPoints.length > TRAIL_CAPACITY) trailPoints.shift();
+    }
+
+    // Drop points that have exceeded their lifespan
+    trailPoints = trailPoints.filter(p => (frameCount - p.born) < TRAIL_LIFE);
+
+    if (trailPoints.length >= 4) drawRainbowTrail();
+  } else {
+    trailPoints = [];
+  }
+
+  if (showMirror) drawCharacterMirrored(cx, cy, bodyAngle, legPhase, smoothSpeed, 255);
+  drawCharacter(cx, cy, bodyAngle, legPhase, smoothSpeed, 255);
+}
+
+function catmullRom(p0, p1, p2, p3, t) {
+  let t2 = t * t, t3 = t2 * t;
+  return {
+    x: 0.5 * ((2*p1.x) + (-p0.x+p2.x)*t + (2*p0.x-5*p1.x+4*p2.x-p3.x)*t2 + (-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+    y: 0.5 * ((2*p1.y) + (-p0.y+p2.y)*t + (2*p0.y-5*p1.y+4*p2.y-p3.y)*t2 + (-p0.y+3*p1.y-3*p2.y+p3.y)*t3),
+  };
+}
+
+function drawRainbowTrail() {
+  if (trailPoints.length < 4) return;
+
+  let topLocal    = min(pieces.map(p => p.ty - p.h / 2)) * sizeMult;
+  let bottomLocal = max(pieces.map(p => p.ty + p.h / 2)) * sizeMult;
+  let totalH      = bottomLocal - topLocal;
+  let stripeH     = totalH / RAINBOW_HUES.length;
+  let n           = trailPoints.length;
+
+  // Moving-average smooth
+  let smooth = trailPoints.map((p, i) => {
+    let r = 3, sx = 0, sy = 0, c = 0;
+    for (let j = max(0, i-r); j <= min(n-1, i+r); j++) {
+      sx += trailPoints[j].x; sy += trailPoints[j].y; c++;
+    }
+    return { x: sx/c, y: sy/c, born: trailPoints[i].born };
+  });
+
+  // Catmull-Rom subdivide — 10 sub-steps, interpolate age too
+  const STEPS = 10;
+  let dense = [];
+  for (let i = 0; i < smooth.length - 1; i++) {
+    let p0 = smooth[max(0, i-1)];
+    let p1 = smooth[i];
+    let p2 = smooth[i+1];
+    let p3 = smooth[min(smooth.length-1, i+2)];
+    for (let s = 0; s < STEPS; s++) {
+      let pt = catmullRom(p0, p1, p2, p3, s / STEPS);
+      pt.born = lerp(p1.born, p2.born, s / STEPS);
+      dense.push(pt);
+    }
+  }
+  dense.push(smooth[smooth.length - 1]);
+
+  colorMode(HSB, 360, 100, 100, 255);
+  noFill();
+  strokeCap(ROUND);
+  strokeJoin(ROUND);
+  strokeWeight(stripeH);
+
+  for (let b = 0; b < RAINBOW_HUES.length; b++) {
+    let hue    = RAINBOW_HUES[b];
+    let offset = topLocal + b * stripeH + stripeH / 2;
+
+    // Draw segment by segment — alpha from per-point age
+    for (let i = 0; i < dense.length - 1; i++) {
+      let age   = frameCount - dense[i].born;
+      let alpha = map(age, 0, TRAIL_LIFE, 220, 0);
+      if (alpha <= 0) continue;
+      stroke(hue, 88, 100, alpha);
+      line(dense[i].x,   dense[i].y   + offset,
+           dense[i+1].x, dense[i+1].y + offset);
+    }
+  }
+
+  colorMode(RGB, 255);
+  noStroke();
+}
+
+function updateCharacter() {
+  let dx = mouseX - cx;
+  let dy = mouseY - cy;
+
+  vx += dx * dragStrength;
+  vy += dy * dragStrength;
+  vx *= damping;
+  vy *= damping;
+
+  cx += vx;
+  cy += vy;
+
+  dragX = -vx * 0.12;
+  dragY = -vy * 0.12;
+
+  let speed = sqrt(vx * vx + vy * vy);
+  smoothSpeed += (speed - smoothSpeed) * 0.1;
+  legPhase += smoothSpeed * 0.015;
+
+  let targetAngle = 0;
+  if (speed > 0.1) {
+    let tiltMag = min(speed * 0.055, 0.45);
+    targetAngle = (vx / speed) * tiltMag;
+  }
+  bodyAngVel += (targetAngle - bodyAngle) * 0.12;
+  bodyAngVel *= 0.72;
+  bodyAngle += bodyAngVel;
+}
+
+function drawCharacter(x, y, angle, lPhase, spd, alpha) {
+  let sorted = [...pieces].sort((a, b) => a.order - b.order);
+  let speedFactor = constrain(spd / 4, 0, 1);
+
+  push();
+  translate(x + dragX, y + dragY - headOffsetY * sizeMult);
+  rotate(angle);
+  scale(sizeMult);
+
+  for (let p of sorted) {
+    push();
+
+    if (p.key === 'leftleg' || p.key === 'rightleg') {
+      let phase = p.key === 'leftleg' ? lPhase : lPhase + PI;
+      let swing = sin(phase) * 0.38 * speedFactor;
+      translate(p.tx, p.ty - p.h / 2);
+      rotate(swing);
+      tint(255, alpha);
+      image(imgs[p.key], 0, p.h / 2, p.w, p.h);
+
+    } else if (p.key === 'arm1' || p.key === 'arm1_1' ||
+               p.key === 'armright' || p.key === 'armright_1') {
+      let isLeft  = p.key === 'arm1' || p.key === 'arm1_1';
+      let isLower = p.key === 'arm1_1' || p.key === 'armright_1';
+      let phase   = isLeft ? lPhase + PI : lPhase;
+      let swing   = sin(phase) * 0.28 * speedFactor;
+      let upper   = pieces.find(q => q.key === (isLeft ? 'arm1' : 'armright'));
+      translate(p.tx, upper.ty - upper.h / 2);
+      rotate(swing);
+      tint(255, alpha);
+      let offsetY = isLower ? upper.h + p.h / 2 : p.h / 2;
+      image(imgs[p.key], 0, offsetY, p.w, p.h);
+
+    } else {
+      translate(p.tx, p.ty);
+      let flail = sin(frameCount * 0.12 + p.tx * 0.05) * 0.12 * speedFactor;
+      flail += vx * 0.006 * speedFactor;
+      if (p.key === 'face') flail *= 0.25;
+      rotate(flail);
+      tint(255, alpha);
+      image(imgs[p.key], 0, 0, p.w, p.h);
+    }
+
+    pop();
+  }
+
+  pop();
+}
+
+function drawCharacterMirrored(x, y, angle, lPhase, spd, alpha) {
+  push();
+  translate(width, 0);
+  scale(-1, 1);
+  drawCharacter(x, y, angle, lPhase, spd, alpha);
+  pop();
+}
+
+function keyPressed() {
+  if (key === 'z' || key === 'Z') showMirror = !showMirror;
+
+  if (key === 't' || key === 'T') {
+    trailEnabled = !trailEnabled;
+    if (!trailEnabled) trailPoints = [];
+  }
+
+  if (keyCode === UP_ARROW)   sizeMult = constrain(sizeMult + SIZE_STEP, SIZE_MIN, SIZE_MAX);
+  if (keyCode === DOWN_ARROW) sizeMult = constrain(sizeMult - SIZE_STEP, SIZE_MIN, SIZE_MAX);
+
+  if (keyCode === UP_ARROW || keyCode === DOWN_ARROW) return false;
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  recalc();
+}
