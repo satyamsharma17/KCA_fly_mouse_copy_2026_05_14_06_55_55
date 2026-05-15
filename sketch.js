@@ -15,8 +15,10 @@ const PIECE_DEFS = [
   { key: 'hairclip',   file: 'hairclip.svg',   tx:  -40, ty: -215, nw:  70.09, nh:  68.33, order: 5 },
 ];
 
-// VIBGYOR hues in HSB
-const RAINBOW_HUES = [270, 250, 210, 120, 60, 30, 0];
+// Cape colors as RGB
+const CAPE_COLORS = [
+  [17, 97, 245],  // #1161f5
+];
 
 let imgs = {};
 let pieces = [];
@@ -45,10 +47,9 @@ const SIZE_MAX  = 3.0;
 
 let trailEnabled = false;
 
-// Each point: { x, y, born } — born is frameCount when the point was added
 let trailPoints = [];
 const TRAIL_CAPACITY = 300;
-const TRAIL_LIFE = 30; // frames until fully faded (~0.5s at 60fps)
+const TRAIL_LIFE = 30;
 
 function preload() {
   for (let p of PIECE_DEFS) imgs[p.key] = loadImage(p.file);
@@ -79,17 +80,19 @@ function draw() {
   updateCharacter();
 
   if (trailEnabled) {
-    let headX = cx + dragX;
-    let headY = cy + dragY - headOffsetY * sizeMult;
+    // Anchor fixed to neck/back
+    let neckLocal = -120 * scl * sizeMult;
+    let originX = cx + dragX;
+    let originY = cy + dragY - headOffsetY * sizeMult;
+    let feetX = originX - sin(bodyAngle) * neckLocal;
+    let feetY = originY + cos(bodyAngle) * neckLocal;
 
-    // Add point only when moved at least 4px
     let last = trailPoints[trailPoints.length - 1];
-    if (!last || dist(headX, headY, last.x, last.y) > 4) {
-      trailPoints.push({ x: headX, y: headY, born: frameCount });
+    if (!last || dist(feetX, feetY, last.x, last.y) > 4) {
+      trailPoints.push({ x: feetX, y: feetY, born: frameCount });
       if (trailPoints.length > TRAIL_CAPACITY) trailPoints.shift();
     }
 
-    // Drop points that have exceeded their lifespan
     trailPoints = trailPoints.filter(p => (frameCount - p.born) < TRAIL_LIFE);
 
     if (trailPoints.length >= 4) drawRainbowTrail();
@@ -112,11 +115,10 @@ function catmullRom(p0, p1, p2, p3, t) {
 function drawRainbowTrail() {
   if (trailPoints.length < 4) return;
 
-  let topLocal    = min(pieces.map(p => p.ty - p.h / 2)) * sizeMult;
-  let bottomLocal = max(pieces.map(p => p.ty + p.h / 2)) * sizeMult;
-  let totalH      = bottomLocal - topLocal;
-  let stripeH     = totalH / RAINBOW_HUES.length;
-  let n           = trailPoints.length;
+  let n = trailPoints.length;
+
+  let narrowW = 80  * scl * sizeMult;
+  let wideW   = 320 * scl * sizeMult;
 
   // Moving-average smooth
   let smooth = trailPoints.map((p, i) => {
@@ -127,8 +129,8 @@ function drawRainbowTrail() {
     return { x: sx/c, y: sy/c, born: trailPoints[i].born };
   });
 
-  // Catmull-Rom subdivide — 10 sub-steps, interpolate age too
-  const STEPS = 10;
+  // Catmull-Rom subdivide — t=0 oldest/tail, t=1 newest/neck
+  const STEPS = 8;
   let dense = [];
   for (let i = 0; i < smooth.length - 1; i++) {
     let p0 = smooth[max(0, i-1)];
@@ -136,36 +138,55 @@ function drawRainbowTrail() {
     let p2 = smooth[i+1];
     let p3 = smooth[min(smooth.length-1, i+2)];
     for (let s = 0; s < STEPS; s++) {
-      let pt = catmullRom(p0, p1, p2, p3, s / STEPS);
+      let pt  = catmullRom(p0, p1, p2, p3, s / STEPS);
+      pt.t    = (i * STEPS + s) / ((smooth.length - 1) * STEPS);
       pt.born = lerp(p1.born, p2.born, s / STEPS);
       dense.push(pt);
     }
   }
-  dense.push(smooth[smooth.length - 1]);
+  dense.push({ ...smooth[smooth.length-1], t: 1, born: smooth[smooth.length-1].born });
 
-  colorMode(HSB, 360, 100, 100, 255);
-  noFill();
-  strokeCap(ROUND);
-  strokeJoin(ROUND);
-  strokeWeight(stripeH);
-
-  for (let b = 0; b < RAINBOW_HUES.length; b++) {
-    let hue    = RAINBOW_HUES[b];
-    let offset = topLocal + b * stripeH + stripeH / 2;
-
-    // Draw segment by segment — alpha from per-point age
-    for (let i = 0; i < dense.length - 1; i++) {
-      let age   = frameCount - dense[i].born;
-      let alpha = map(age, 0, TRAIL_LIFE, 220, 0);
-      if (alpha <= 0) continue;
-      stroke(hue, 88, 100, alpha);
-      line(dense[i].x,   dense[i].y   + offset,
-           dense[i+1].x, dense[i+1].y + offset);
-    }
-  }
+  // Perpendicular normals
+  let normals = dense.map((pt, i) => {
+    let a = dense[max(i-1, 0)];
+    let b = dense[min(i+1, dense.length-1)];
+    let dx = b.x - a.x, dy = b.y - a.y;
+    let len = sqrt(dx*dx + dy*dy) || 1;
+    return { nx: -dy/len, ny: dx/len };
+  });
 
   colorMode(RGB, 255);
   noStroke();
+
+  let nc = CAPE_COLORS.length;
+  for (let b = 0; b < nc; b++) {
+    let col = CAPE_COLORS[b];
+    let fL  = (b     / nc) - 0.5;
+    let fR  = ((b+1) / nc) - 0.5;
+
+    for (let i = 0; i < dense.length - 1; i++) {
+      let t     = dense[i].t;
+      let alpha = t >= 0.7 ? 255 : pow(t / 0.7, 3) * 255;
+      if (alpha <= 0) continue;
+
+      let c0 = pow(1 - dense[i].t,   2);
+      let c1 = pow(1 - dense[i+1].t, 2);
+      let w0 = lerp(narrowW, wideW, c0);
+      let w1 = lerp(narrowW, wideW, c1);
+
+      let n0 = normals[i], n1 = normals[i+1];
+
+      let x1 = dense[i].x   + n0.nx * fL * w0,  y1 = dense[i].y   + n0.ny * fL * w0;
+      let x2 = dense[i].x   + n0.nx * fR * w0,  y2 = dense[i].y   + n0.ny * fR * w0;
+      let x3 = dense[i+1].x + n1.nx * fR * w1,  y3 = dense[i+1].y + n1.ny * fR * w1;
+      let x4 = dense[i+1].x + n1.nx * fL * w1,  y4 = dense[i+1].y + n1.ny * fL * w1;
+
+      fill(col[0], col[1], col[2], alpha);
+      quad(x1, y1, x2, y2, x3, y3, x4, y4);
+    }
+  }
+
+  noFill();
 }
 
 function updateCharacter() {
