@@ -41,9 +41,13 @@ let smoothSpeed = 0;
 let showMirror = false;
 
 let sizeMult = 1.0;
-const SIZE_STEP = 0.1;
-const SIZE_MIN  = 0.3;
-const SIZE_MAX  = 3.0;
+const SIZE_MIN  = 0.05;
+const SIZE_MAX  = 10.0;
+
+let sizeSpeed = 0;
+const SIZE_ACCEL = 0.004;
+const SIZE_MAX_SPEED = 0.12;
+const SIZE_FRICTION = 0.85;
 
 let trailEnabled = false;
 
@@ -75,8 +79,20 @@ function recalc() {
   headOffsetY = -170 * scl;
 }
 
+function updateSize() {
+  if (keyIsDown(UP_ARROW)) {
+    sizeSpeed = min(sizeSpeed + SIZE_ACCEL, SIZE_MAX_SPEED);
+  } else if (keyIsDown(DOWN_ARROW)) {
+    sizeSpeed = max(sizeSpeed - SIZE_ACCEL, -SIZE_MAX_SPEED);
+  } else {
+    sizeSpeed *= SIZE_FRICTION;
+  }
+  sizeMult = constrain(sizeMult + sizeSpeed, SIZE_MIN, SIZE_MAX);
+}
+
 function draw() {
   background(255);
+  updateSize();
   updateCharacter();
 
   if (trailEnabled) {
@@ -282,9 +298,6 @@ function keyPressed() {
     trailEnabled = !trailEnabled;
     if (!trailEnabled) trailPoints = [];
   }
-
-  if (keyCode === UP_ARROW)   sizeMult = constrain(sizeMult + SIZE_STEP, SIZE_MIN, SIZE_MAX);
-  if (keyCode === DOWN_ARROW) sizeMult = constrain(sizeMult - SIZE_STEP, SIZE_MIN, SIZE_MAX);
 
   if (keyCode === UP_ARROW || keyCode === DOWN_ARROW) return false;
 }
